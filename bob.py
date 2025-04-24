@@ -1,12 +1,19 @@
 import socket
 import base64
 import time
-
+import dotenv
+import os
 import cryptography
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+dotenv.load_dotenv()
+
 
 class Bob:
     def __init__(self):
@@ -20,10 +27,14 @@ class Bob:
 
     def register(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect(('127.0.0.1', 5001))
-            s.send(f'REGISTER Bob id {base64.b64encode(self.id_pub.public_bytes_raw()).decode()}'.encode())
+            s.connect((os.getenv("HOST"), int(os.getenv("PORT"))))
+            s.send(
+                f"REGISTER Bob id {base64.b64encode(self.id_pub.public_bytes_raw()).decode()}".encode()
+            )
             s.recv(1024)
-            s.send(f'REGISTER Bob prekey {base64.b64encode(self.prekey_pub.public_bytes_raw()).decode()}'.encode())
+            s.send(
+                f"REGISTER Bob prekey {base64.b64encode(self.prekey_pub.public_bytes_raw()).decode()}".encode()
+            )
             s.recv(1024)
 
     def x3dh(self, alice_id_pub, alice_eph_pub):
@@ -31,9 +42,9 @@ class Bob:
         dh2 = self.prekey_priv.exchange(alice_id_pub)
         dh3 = self.id_priv.exchange(alice_eph_pub)
         shared_secret = dh1 + dh2 + dh3
-        hkdf = HKDF(hashes.SHA256(), 32, None, b'x3dh root key')
+        hkdf = HKDF(hashes.SHA256(), 32, None, b"x3dh root key")
         self.root_key = hkdf.derive(shared_secret)
-        root_hkdf = HKDF(hashes.SHA256(), 64, None, b'root chain')
+        root_hkdf = HKDF(hashes.SHA256(), 64, None, b"root chain")
         root_material = root_hkdf.derive(self.root_key)
         self.recv_chain, self.send_chain = root_material[:32], root_material[32:]
 
@@ -43,7 +54,7 @@ class Bob:
         return material[:32], material[32:]
 
     def decrypt(self, nonce, ciphertext):
-        msg_key, self.recv_chain = self.step_chain(self.recv_chain, b'send_chain')
+        msg_key, self.recv_chain = self.step_chain(self.recv_chain, b"send_chain")
         print(f"Bob msg_key: {msg_key}")  # Log the msg_key here
         try:
             decrypted_message = AESGCM(msg_key).decrypt(nonce, ciphertext, None)
@@ -61,21 +72,25 @@ class Bob:
         print("Bob is ready.")
         while True:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect(('127.0.0.1', 5001))
-                s.send(b'RECEIVE Bob')
+                s.connect(("127.0.0.1", 5001))
+                s.send(b"RECEIVE Bob")
 
                 try:
                     msg = s.recv(2048).decode()
                 except ValueError:
                     print("Message decryption failed on bob's side")
 
-                if msg == 'NO_MESSAGES':
+                if msg == "NO_MESSAGES":
                     time.sleep(0.5)
                     continue
-                if msg.startswith('ALICE_KEYS'):
+                if msg.startswith("ALICE_KEYS"):
                     _, id_pub, eph_pub = msg.split()
-                    alice_id = X25519PublicKey.from_public_bytes(base64.b64decode(id_pub))
-                    alice_eph = X25519PublicKey.from_public_bytes(base64.b64decode(eph_pub))
+                    alice_id = X25519PublicKey.from_public_bytes(
+                        base64.b64decode(id_pub)
+                    )
+                    alice_eph = X25519PublicKey.from_public_bytes(
+                        base64.b64decode(eph_pub)
+                    )
                     self.x3dh(alice_id, alice_eph)
                     print("Root key established.")
                 else:
@@ -101,6 +116,7 @@ class Bob:
                         print("Decrypted:", decrypted_msg.decode())
                     except Exception as e:
                         print(f"Error during decryption: {e}")
+
 
 if __name__ == "__main__":
     Bob().listen()
