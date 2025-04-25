@@ -13,6 +13,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 dotenv.load_dotenv()
 
+HOST = os.getenv("HOST")
+PORT = int(os.getenv("PORT"))
+
 
 class Alice:
     def __init__(self):
@@ -26,7 +29,7 @@ class Alice:
 
     def get_bob_keys(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((os.getenv("HOST"), int(os.getenv("PORT"))))
+            s.connect((HOST, PORT))
             s.send(b"GET_KEYS Bob")
             data = s.recv(1024).decode()
             if data.startswith("KEYS"):
@@ -62,14 +65,13 @@ class Alice:
 
     def encrypt(self, plaintext):
         msg_key, self.send_chain = self.step_chain(self.send_chain, b"send_chain")
-        print(f"Alice msg_key: {msg_key}")
         nonce = os.urandom(12)
         ciphertext = AESGCM(msg_key).encrypt(nonce, plaintext.encode(), None)
         return nonce, ciphertext
 
     def send(self, msg):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect(("127.0.0.1", 5001))
+            s.connect((HOST, PORT))
             s.send(f"SEND Alice Bob {msg}".encode())
             s.recv(1024)
 

@@ -14,6 +14,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 dotenv.load_dotenv()
 
+HOST = os.getenv("HOST")
+PORT = int(os.getenv("PORT"))
+
 
 class Bob:
     def __init__(self):
@@ -27,7 +30,7 @@ class Bob:
 
     def register(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((os.getenv("HOST"), int(os.getenv("PORT"))))
+            s.connect((HOST, PORT))
             s.send(
                 f"REGISTER Bob id {base64.b64encode(self.id_pub.public_bytes_raw()).decode()}".encode()
             )
@@ -55,10 +58,8 @@ class Bob:
 
     def decrypt(self, nonce, ciphertext):
         msg_key, self.recv_chain = self.step_chain(self.recv_chain, b"send_chain")
-        print(f"Bob msg_key: {msg_key}")  # Log the msg_key here
         try:
             decrypted_message = AESGCM(msg_key).decrypt(nonce, ciphertext, None)
-            print("Decrypted message:", decrypted_message.decode())
             return decrypted_message
         except cryptography.exceptions.InvalidTag:
             print("Decryption failed due to invalid tag.")
@@ -72,7 +73,7 @@ class Bob:
         print("Bob is ready.")
         while True:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect(("127.0.0.1", 5001))
+                s.connect((HOST, PORT))
                 s.send(b"RECEIVE Bob")
 
                 try:
@@ -95,8 +96,6 @@ class Bob:
                     print("Root key established.")
                 else:
                     parts = msg.split()
-                    print("Raw Message:", msg)  # Print the full message for inspection
-                    print("Parts:", parts)  # Print the parts after splitting
 
                     # Ensure there are exactly three parts (msg, nonce, ciphertext)
                     if len(parts) != 3:
@@ -107,13 +106,10 @@ class Bob:
                     nonce = base64.b64decode(parts[1])
                     ciphertext = base64.b64decode(parts[2])
 
-                    print("Decoded Nonce:", nonce)
-                    print("Decoded Ciphertext:", ciphertext)
-
                     # Now attempt to decrypt
                     try:
                         decrypted_msg = self.decrypt(nonce, ciphertext)
-                        print("Decrypted:", decrypted_msg.decode())
+                        print("Alice:", decrypted_msg.decode())
                     except Exception as e:
                         print(f"Error during decryption: {e}")
 

@@ -2,12 +2,16 @@ import socket
 import threading
 import base64
 import dotenv
+import os
 
 dotenv.load_dotenv()
 
+HOST = os.getenv("HOST")
+PORT = int(os.getenv("PORT"))
+
 
 class Server:
-    def __init__(self, host="127.0.0.1", port=5001):
+    def __init__(self, host=HOST, port=PORT):
         self.host = host
         self.port = port
         self.public_keys = {}  # {user: {'id': key, 'prekey': key}}
