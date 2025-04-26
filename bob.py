@@ -3,6 +3,7 @@ import base64
 import time
 import dotenv
 import os
+import threading
 import cryptography
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
@@ -68,24 +69,44 @@ class Bob:
             print(f"Error during decryption: {e}")
             raise
 
+    def encrypt(self, plaintext):
+        msg_key, self.send_chain = self.step_chain(self.send_chain, b"send_chain")
+        nonce = os.urandom(12)
+        ciphertext = AESGCM(msg_key).encrypt(nonce, plaintext.encode(), None)
+        return nonce, ciphertext
+
+    def send_message(self, msg):
+        nonce, ciphertext = self.encrypt(msg)
+        encoded_nonce = base64.b64encode(nonce).decode()
+        encoded_ciphertext = base64.b64encode(ciphertext).decode()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((HOST, PORT))
+            s.send(f"SEND Bob Alice MSG {encoded_nonce} {encoded_ciphertext}".encode())
+            s.recv(1024)
+
     def listen(self):
         self.register()
         print("Bob is ready.")
+
+        # Start sending thread
+        def send_input():
+            while True:
+                message = input("You (Bob): ")
+                self.send_message(message)
+
+        threading.Thread(target=send_input, daemon=True).start()
+
+        # Listen for messages
         while True:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.connect((HOST, PORT))
                 s.send(b"RECEIVE Bob")
-
-                try:
-                    msg = s.recv(2048).decode()
-                except ValueError:
-                    print("Message decryption failed on bob's side")
-
-                if msg == "NO_MESSAGES":
+                data = s.recv(2048).decode()
+                if data == "NO_MESSAGES":
                     time.sleep(0.5)
                     continue
-                if msg.startswith("ALICE_KEYS"):
-                    _, id_pub, eph_pub = msg.split()
+                if data.startswith("ALICE_KEYS"):
+                    _, id_pub, eph_pub = data.split()
                     alice_id = X25519PublicKey.from_public_bytes(
                         base64.b64decode(id_pub)
                     )
@@ -94,24 +115,15 @@ class Bob:
                     )
                     self.x3dh(alice_id, alice_eph)
                     print("Root key established.")
-                else:
-                    parts = msg.split()
-
-                    # Ensure there are exactly three parts (msg, nonce, ciphertext)
-                    if len(parts) != 3:
-                        print("Error: Invalid message format.")
-                        continue
-
-                    # Decode base64 encoded nonce and ciphertext
-                    nonce = base64.b64decode(parts[1])
-                    ciphertext = base64.b64decode(parts[2])
-
-                    # Now attempt to decrypt
+                elif data.startswith("MSG"):
+                    _, nonce, ciphertext = data.split()
                     try:
-                        decrypted_msg = self.decrypt(nonce, ciphertext)
-                        print("Alice:", decrypted_msg.decode())
+                        decrypted = self.decrypt(
+                            base64.b64decode(nonce), base64.b64decode(ciphertext)
+                        )
+                        print(f"\nAlice: {decrypted.decode()}")
                     except Exception as e:
-                        print(f"Error during decryption: {e}")
+                        print(f"\nFailed to decrypt message: {e}")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,8 @@ import base64
 import time
 import os
 import dotenv
+import threading
+import cryptography
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
@@ -69,11 +71,45 @@ class Alice:
         ciphertext = AESGCM(msg_key).encrypt(nonce, plaintext.encode(), None)
         return nonce, ciphertext
 
-    def send(self, msg):
+    def decrypt(self, nonce, ciphertext):
+        msg_key, self.recv_chain = self.step_chain(self.recv_chain, b"send_chain")
+        try:
+            decrypted_message = AESGCM(msg_key).decrypt(nonce, ciphertext, None)
+            return decrypted_message
+        except cryptography.exceptions.InvalidTag:
+            print("Decryption failed due to invalid tag.")
+            raise
+        except Exception as e:
+            print(f"Error during decryption: {e}")
+            raise
+
+    def send_message(self, msg):
+        nonce, ciphertext = self.encrypt(msg)
+        encoded_nonce = base64.b64encode(nonce).decode()
+        encoded_ciphertext = base64.b64encode(ciphertext).decode()
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((HOST, PORT))
-            s.send(f"SEND Alice Bob {msg}".encode())
+            s.send(f"SEND Alice Bob MSG {encoded_nonce} {encoded_ciphertext}".encode())
             s.recv(1024)
+
+    def listen_for_messages(self):
+        while True:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((HOST, PORT))
+                s.send(b"RECEIVE Alice")
+                data = s.recv(2048).decode()
+                if data == "NO_MESSAGES":
+                    time.sleep(0.5)
+                    continue
+                if data.startswith("MSG"):
+                    _, nonce, ciphertext = data.split()
+                    try:
+                        decrypted = self.decrypt(
+                            base64.b64decode(nonce), base64.b64decode(ciphertext)
+                        )
+                        print(f"\nBob: {decrypted.decode()}")
+                    except Exception as e:
+                        print(f"\nFailed to decrypt message: {e}")
 
     def start(self):
         time.sleep(1)
@@ -84,21 +120,26 @@ class Alice:
         self.x3dh(bob_id_pub, bob_prekey_pub)
         print("Root key established.")
 
-        # Send Alice's public keys to Bob for root key derivation
         id_pub_b64 = base64.b64encode(self.id_pub.public_bytes_raw()).decode()
         eph_pub_b64 = base64.b64encode(self.eph_pub.public_bytes_raw()).decode()
-        self.send(f"ALICE_KEYS {id_pub_b64} {eph_pub_b64}")
-        print("Sent key info to Bob.")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((HOST, PORT))
+            s.send(f"SEND Alice Bob ALICE_KEYS {id_pub_b64} {eph_pub_b64}".encode())
+            s.recv(1024)
 
-        # Wait for Bob to process keys
         time.sleep(1)
 
-        # Send encrypted message
-        nonce, ciphertext = self.encrypt("Hello Bobby! 🕊️")
-        self.send(
-            f"MSG {base64.b64encode(nonce).decode()} {base64.b64encode(ciphertext).decode()}"
-        )
-        print("Message sent.")
+        # Start listening thread
+        threading.Thread(target=self.listen_for_messages, daemon=True).start()
+
+        # Send initial message
+        self.send_message("Hello Bobby! 🕊️")
+        print("Initial message sent.")
+
+        # Continuous input loop
+        while True:
+            message = input("You (Alice): ")
+            self.send_message(message)
 
 
 if __name__ == "__main__":
