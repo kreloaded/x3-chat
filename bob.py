@@ -20,7 +20,14 @@ PORT = int(os.getenv("PORT"))
 
 
 class Bob:
+    """
+    Represents Bob in a secure messaging protocol using the X3DH and Double Ratchet algorithms.
+    """
+
     def __init__(self):
+        """
+        Initializes Bob's identity and prekey pairs and sets up placeholders for cryptographic state.
+        """
         self.id_priv = X25519PrivateKey.generate()
         self.id_pub = self.id_priv.public_key()
         self.prekey_priv = X25519PrivateKey.generate()
@@ -30,6 +37,9 @@ class Bob:
         self.recv_chain = None
 
     def register(self):
+        """
+        Registers Bob's identity and prekey public keys with the server.
+        """
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((HOST, PORT))
             s.send(
@@ -42,6 +52,13 @@ class Bob:
             s.recv(1024)
 
     def x3dh(self, alice_id_pub, alice_eph_pub):
+        """
+        Performs the X3DH key agreement protocol with Alice's identity and ephemeral keys.
+
+        Args:
+            alice_id_pub (X25519PublicKey): Alice's identity public key.
+            alice_eph_pub (X25519PublicKey): Alice's ephemeral public key.
+        """
         dh1 = self.id_priv.exchange(alice_id_pub)
         dh2 = self.prekey_priv.exchange(alice_id_pub)
         dh3 = self.id_priv.exchange(alice_eph_pub)
@@ -53,11 +70,35 @@ class Bob:
         self.recv_chain, self.send_chain = root_material[:32], root_material[32:]
 
     def step_chain(self, chain, info):
+        """
+        Advances the key chain using HKDF.
+
+        Args:
+            chain (bytes): The current chain key.
+            info (bytes): Context-specific info used in HKDF.
+
+        Returns:
+            tuple: A tuple containing (message_key, next_chain_key).
+        """
         hkdf = HKDF(hashes.SHA256(), 64, None, info)
         material = hkdf.derive(chain)
         return material[:32], material[32:]
 
     def decrypt(self, nonce, ciphertext):
+        """
+        Decrypts a message using the current receive chain.
+
+        Args:
+            nonce (bytes): A 12-byte nonce used during encryption.
+            ciphertext (bytes): The encrypted message.
+
+        Returns:
+            bytes: The decrypted message.
+
+        Raises:
+            cryptography.exceptions.InvalidTag: If authentication fails.
+            Exception: For any other error during decryption.
+        """
         msg_key, self.recv_chain = self.step_chain(self.recv_chain, b"send_chain")
         try:
             decrypted_message = AESGCM(msg_key).decrypt(nonce, ciphertext, None)
@@ -70,12 +111,27 @@ class Bob:
             raise
 
     def encrypt(self, plaintext):
+        """
+        Encrypts a plaintext message using the current send chain.
+
+        Args:
+            plaintext (str): The message to encrypt.
+
+        Returns:
+            tuple: A tuple containing (nonce, ciphertext).
+        """
         msg_key, self.send_chain = self.step_chain(self.send_chain, b"send_chain")
         nonce = os.urandom(12)
         ciphertext = AESGCM(msg_key).encrypt(nonce, plaintext.encode(), None)
         return nonce, ciphertext
 
     def send_message(self, msg):
+        """
+        Encrypts and sends a message to Alice via the server.
+
+        Args:
+            msg (str): The plaintext message to send.
+        """
         nonce, ciphertext = self.encrypt(msg)
         encoded_nonce = base64.b64encode(nonce).decode()
         encoded_ciphertext = base64.b64encode(ciphertext).decode()
@@ -85,6 +141,10 @@ class Bob:
             s.recv(1024)
 
     def listen(self):
+        """
+        Starts Bob's listening loop: registers with the server, listens for messages,
+        performs X3DH handshake if needed, and allows user to send messages interactively.
+        """
         self.register()
         print("Bob is ready.")
 
