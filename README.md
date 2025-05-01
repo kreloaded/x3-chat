@@ -45,8 +45,8 @@ sequenceDiagram
 Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/secure-x3dh-chat.git
-cd secure-x3dh-chat
+git clone https://github.com/kreloaded/x3dh-chat.git
+cd x3dh-chat
 ```
 
 ### Install dependencies:
@@ -57,7 +57,7 @@ pip install -r requirements.txt
 ### Create environment file:
 
 ```bash
-cp .env.example .env
+cp sample.env .env
 ```
 
 ## Usage
