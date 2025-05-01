@@ -1,4 +1,5 @@
 # Secure X3DH Chat Application 🔐
+A secure, terminal-based chat app using X3DH and Double Ratchet algorithms.
 
 ![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)
 
@@ -17,7 +18,6 @@ A secure end-to-end encrypted chat implementation using the Extended Triple Diff
 - **Perfect Forward Secrecy** with message-specific keys
 - **AES-256-GCM** authenticated encryption
 - **Two-way asynchronous communication**
-- **Console-based interface** with colored output
 
 ## Cryptographic Overview
 
@@ -49,6 +49,15 @@ git clone https://github.com/kreloaded/x3dh-chat.git
 cd x3dh-chat
 ```
 
+### Create Environment
+```bash
+python3 -m venv .venv
+```
+💡 Make sure to activate the virtual environment in each terminal
+```bash
+source .venv/bin/activate
+```
+
 ### Install dependencies:
 ```bash
 pip install -r requirements.txt
@@ -64,15 +73,15 @@ cp sample.env .env
 
 ### Start the Server (Terminal 1)
 ```bash
-python server.py
+python3 server.py
 ```
 
 ### Start Bob (Terminal 2)
 ```bash
-python bob.py
+python3 bob.py
 ```
 
 ### Start Alice (Terminal 3)
 ```bash
-python alice.py
+python3 alice.py
 ```
