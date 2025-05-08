@@ -35,6 +35,11 @@ class Bob:
         self.root_key = None
         self.send_chain = None
         self.recv_chain = None
+        # DH Ratchet state
+        self.ratchet_priv = None
+        self.ratchet_pub = None
+        self.remote_ratchet_pub = None
+        self.role = "responder"  # Add role attribute
 
     def register(self):
         """
@@ -68,6 +73,9 @@ class Bob:
         root_hkdf = HKDF(hashes.SHA256(), 64, None, b"root chain")
         root_material = root_hkdf.derive(self.root_key)
         self.recv_chain, self.send_chain = root_material[:32], root_material[32:]
+        # Initialize DH Ratchet after X3DH
+        self.ratchet_priv = X25519PrivateKey.generate()
+        self.ratchet_pub = self.ratchet_priv.public_key()
 
     def step_chain(self, chain, info):
         """
@@ -84,32 +92,6 @@ class Bob:
         material = hkdf.derive(chain)
         return material[:32], material[32:]
 
-    def decrypt(self, nonce, ciphertext):
-        """
-        Decrypts a message using the current receive chain.
-
-        Args:
-            nonce (bytes): A 12-byte nonce used during encryption.
-            ciphertext (bytes): The encrypted message.
-
-        Returns:
-            bytes: The decrypted message.
-
-        Raises:
-            cryptography.exceptions.InvalidTag: If authentication fails.
-            Exception: For any other error during decryption.
-        """
-        msg_key, self.recv_chain = self.step_chain(self.recv_chain, b"send_chain")
-        try:
-            decrypted_message = AESGCM(msg_key).decrypt(nonce, ciphertext, None)
-            return decrypted_message
-        except cryptography.exceptions.InvalidTag:
-            print("Decryption failed due to invalid tag.")
-            raise
-        except Exception as e:
-            print(f"Error during decryption: {e}")
-            raise
-
     def encrypt(self, plaintext):
         """
         Encrypts a plaintext message using the current send chain.
@@ -125,6 +107,53 @@ class Bob:
         ciphertext = AESGCM(msg_key).encrypt(nonce, plaintext.encode(), None)
         return nonce, ciphertext
 
+    def decrypt(self, nonce, ciphertext):
+        """
+        Decrypts a message using the current receive chain.
+
+        Args:
+            nonce (bytes): A 12-byte nonce used during encryption.
+            ciphertext (bytes): The encrypted message.
+
+        Returns:
+            bytes: The decrypted message.
+
+        Raises:
+            cryptography.exceptions.InvalidTag: If authentication fails.
+            Exception: For any other error during decryption.
+        """
+        msg_key, self.recv_chain = self.step_chain(
+            self.recv_chain, b"send_chain"
+        )  # Use "send_chain"
+        try:
+            return AESGCM(msg_key).decrypt(nonce, ciphertext, None)
+        except cryptography.exceptions.InvalidTag:
+            print("Decryption failed: Invalid tag")
+            raise
+
+    def perform_dh_ratchet(self, new_ratchet_pub):
+        # Generate new ratchet key pair
+        new_self_ratchet_priv = X25519PrivateKey.generate()
+        new_self_ratchet_pub = new_self_ratchet_priv.public_key()
+
+        # Compute DH
+        dh_shared = new_self_ratchet_priv.exchange(new_ratchet_pub)
+
+        # Update root key with combined existing root + new DH
+        hkdf = HKDF(hashes.SHA256(), 32, None, b"dh_ratchet")
+        new_root = hkdf.derive(self.root_key + dh_shared)
+
+        # Derive new chains
+        root_hkdf = HKDF(hashes.SHA256(), 64, None, b"root_chain_update")
+        root_material = root_hkdf.derive(new_root)
+        self.recv_chain, self.send_chain = root_material[:32], root_material[32:]
+
+        # Update state
+        self.root_key = new_root
+        self.remote_ratchet_pub = new_ratchet_pub
+        self.ratchet_priv = new_self_ratchet_priv
+        self.ratchet_pub = new_self_ratchet_pub
+
     def send_message(self, msg):
         """
         Encrypts and sends a message to Alice via the server.
@@ -132,12 +161,15 @@ class Bob:
         Args:
             msg (str): The plaintext message to send.
         """
+        ratchet_pub_b64 = base64.b64encode(self.ratchet_pub.public_bytes_raw()).decode()
         nonce, ciphertext = self.encrypt(msg)
         encoded_nonce = base64.b64encode(nonce).decode()
         encoded_ciphertext = base64.b64encode(ciphertext).decode()
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((HOST, PORT))
-            s.send(f"SEND Bob Alice MSG {encoded_nonce} {encoded_ciphertext}".encode())
+            s.send(
+                f"SEND Bob Alice MSG {ratchet_pub_b64} {encoded_nonce} {encoded_ciphertext}".encode()
+            )
             s.recv(1024)
 
     def listen(self):
@@ -146,9 +178,8 @@ class Bob:
         performs X3DH handshake if needed, and allows user to send messages interactively.
         """
         self.register()
-        print("Bob is ready.")
+        print("Bob is ready")
 
-        # Start sending thread
         def send_input():
             while True:
                 message = input("You (Bob): ")
@@ -156,17 +187,18 @@ class Bob:
 
         threading.Thread(target=send_input, daemon=True).start()
 
-        # Listen for messages
         while True:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.connect((HOST, PORT))
                 s.send(b"RECEIVE Bob")
-                data = s.recv(2048).decode()
+                data = s.recv(4096).decode()
                 if data == "NO_MESSAGES":
                     time.sleep(0.5)
                     continue
-                if data.startswith("ALICE_KEYS"):
-                    _, id_pub, eph_pub = data.split()
+                elif data.startswith("ALICE_KEYS"):
+                    _, id_pub, eph_pub, ratchet_pub_b64 = (
+                        data.split()
+                    )  # Added ratchet_pub
                     alice_id = X25519PublicKey.from_public_bytes(
                         base64.b64decode(id_pub)
                     )
@@ -174,16 +206,32 @@ class Bob:
                         base64.b64decode(eph_pub)
                     )
                     self.x3dh(alice_id, alice_eph)
-                    print("Root key established.")
+                    # Set initial remote ratchet key from ALICE_KEYS
+                    self.remote_ratchet_pub = X25519PublicKey.from_public_bytes(
+                        base64.b64decode(ratchet_pub_b64)
+                    )  # Added
+                    print("Root key established")
                 elif data.startswith("MSG"):
-                    _, nonce, ciphertext = data.split()
+                    _, ratchet_pub_b64, nonce_b64, ciphertext_b64 = data.split()
+                    ratchet_pub = X25519PublicKey.from_public_bytes(
+                        base64.b64decode(ratchet_pub_b64)
+                    )
+                    nonce = base64.b64decode(nonce_b64)
+                    ciphertext = base64.b64decode(ciphertext_b64)
+
+                    # Check if ratchet key changed
+                    ratchet_changed = ratchet_pub != self.remote_ratchet_pub
+
                     try:
-                        decrypted = self.decrypt(
-                            base64.b64decode(nonce), base64.b64decode(ciphertext)
-                        )
+                        # Decrypt with current chains
+                        decrypted = self.decrypt(nonce, ciphertext)
                         print(f"\nAlice: {decrypted.decode()}")
+
+                        # Update DH Ratchet after successful decryption
+                        if ratchet_changed:
+                            self.perform_dh_ratchet(ratchet_pub)
                     except Exception as e:
-                        print(f"\nFailed to decrypt message: {e}")
+                        print(f"\nFailed to decrypt: {e}")
 
 
 if __name__ == "__main__":

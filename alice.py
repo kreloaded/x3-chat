@@ -35,6 +35,11 @@ class Alice:
         self.root_key = None
         self.send_chain = None
         self.recv_chain = None
+        # DH Ratchet state
+        self.ratchet_priv = None
+        self.ratchet_pub = None
+        self.remote_ratchet_pub = None
+        self.role = "initiator"
 
     def get_bob_keys(self):
         """
@@ -59,7 +64,7 @@ class Alice:
                     print("Error decoding keys:", e)
                     return None, None
             else:
-                print("Bob's keys not found. Is Bob running?")
+                print("Bob's keys not found. Exiting.")
                 return None, None
 
     def x3dh(self, bob_id_pub, bob_prekey_pub):
@@ -79,6 +84,9 @@ class Alice:
         root_hkdf = HKDF(hashes.SHA256(), 64, None, b"root chain")
         root_material = root_hkdf.derive(self.root_key)
         self.send_chain, self.recv_chain = root_material[:32], root_material[32:]
+        # Initialize DH Ratchet after X3DH
+        self.ratchet_priv = X25519PrivateKey.generate()
+        self.ratchet_pub = self.ratchet_priv.public_key()
 
     def step_chain(self, chain, info):
         """
@@ -125,30 +133,48 @@ class Alice:
             cryptography.exceptions.InvalidTag: If authentication fails.
             Exception: For all other decryption issues.
         """
-        msg_key, self.recv_chain = self.step_chain(self.recv_chain, b"send_chain")
+        msg_key, self.recv_chain = self.step_chain(
+            self.recv_chain, b"send_chain"
+        )  # Use "send_chain"
         try:
-            decrypted_message = AESGCM(msg_key).decrypt(nonce, ciphertext, None)
-            return decrypted_message
+            return AESGCM(msg_key).decrypt(nonce, ciphertext, None)
         except cryptography.exceptions.InvalidTag:
-            print("Decryption failed due to invalid tag.")
+            print("Decryption failed: Invalid tag")
             raise
-        except Exception as e:
-            print(f"Error during decryption: {e}")
-            raise
+
+    def perform_dh_ratchet(self, new_ratchet_pub):
+        # Generate new ratchet key pair
+        new_self_ratchet_priv = X25519PrivateKey.generate()
+        new_self_ratchet_pub = new_self_ratchet_priv.public_key()
+
+        # Compute DH
+        dh_shared = new_self_ratchet_priv.exchange(new_ratchet_pub)
+
+        # Update root key with combined existing root + new DH
+        hkdf = HKDF(hashes.SHA256(), 32, None, b"dh_ratchet")
+        new_root = hkdf.derive(self.root_key + dh_shared)
+
+        # Derive new chains
+        root_hkdf = HKDF(hashes.SHA256(), 64, None, b"root_chain_update")
+        root_material = root_hkdf.derive(new_root)
+        self.send_chain, self.recv_chain = root_material[:32], root_material[32:]
+
+        # Update state
+        self.root_key = new_root
+        self.remote_ratchet_pub = new_ratchet_pub
+        self.ratchet_priv = new_self_ratchet_priv
+        self.ratchet_pub = new_self_ratchet_pub
 
     def send_message(self, msg):
-        """
-        Encrypts and sends a message to Bob through the server.
-
-        Args:
-            msg (str): Message to send.
-        """
+        ratchet_pub_b64 = base64.b64encode(self.ratchet_pub.public_bytes_raw()).decode()
         nonce, ciphertext = self.encrypt(msg)
         encoded_nonce = base64.b64encode(nonce).decode()
         encoded_ciphertext = base64.b64encode(ciphertext).decode()
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((HOST, PORT))
-            s.send(f"SEND Alice Bob MSG {encoded_nonce} {encoded_ciphertext}".encode())
+            s.send(
+                f"SEND Alice Bob MSG {ratchet_pub_b64} {encoded_nonce} {encoded_ciphertext}".encode()
+            )
             s.recv(1024)
 
     def listen_for_messages(self):
@@ -159,19 +185,31 @@ class Alice:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.connect((HOST, PORT))
                 s.send(b"RECEIVE Alice")
-                data = s.recv(2048).decode()
+                data = s.recv(4096).decode()
                 if data == "NO_MESSAGES":
                     time.sleep(0.5)
                     continue
                 if data.startswith("MSG"):
-                    _, nonce, ciphertext = data.split()
+                    _, ratchet_pub_b64, nonce_b64, ciphertext_b64 = data.split()
+                    ratchet_pub = X25519PublicKey.from_public_bytes(
+                        base64.b64decode(ratchet_pub_b64)
+                    )
+                    nonce = base64.b64decode(nonce_b64)
+                    ciphertext = base64.b64decode(ciphertext_b64)
+
+                    # Check if ratchet key changed
+                    ratchet_changed = ratchet_pub != self.remote_ratchet_pub
+
                     try:
-                        decrypted = self.decrypt(
-                            base64.b64decode(nonce), base64.b64decode(ciphertext)
-                        )
+                        # Decrypt with current chains
+                        decrypted = self.decrypt(nonce, ciphertext)
                         print(f"\nBob: {decrypted.decode()}")
+
+                        # Update DH Ratchet after successful decryption
+                        if ratchet_changed:
+                            self.perform_dh_ratchet(ratchet_pub)
                     except Exception as e:
-                        print(f"\nFailed to decrypt message: {e}")
+                        print(f"\nFailed to decrypt: {e}")
 
     def start(self):
         """
@@ -185,28 +223,28 @@ class Alice:
         time.sleep(1)
         bob_id_pub, bob_prekey_pub = self.get_bob_keys()
         if not bob_id_pub or not bob_prekey_pub:
-            print("Could not retrieve Bob's keys. Exiting.")
             return
         self.x3dh(bob_id_pub, bob_prekey_pub)
-        print("Root key established.")
+        print("Root key established")
 
         id_pub_b64 = base64.b64encode(self.id_pub.public_bytes_raw()).decode()
         eph_pub_b64 = base64.b64encode(self.eph_pub.public_bytes_raw()).decode()
+        ratchet_pub_b64 = base64.b64encode(
+            self.ratchet_pub.public_bytes_raw()
+        ).decode()  # Added
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((HOST, PORT))
-            s.send(f"SEND Alice Bob ALICE_KEYS {id_pub_b64} {eph_pub_b64}".encode())
+            s.send(
+                f"SEND Alice Bob ALICE_KEYS {id_pub_b64} {eph_pub_b64} {ratchet_pub_b64}".encode()
+            )  # Include ratchet key
             s.recv(1024)
 
         time.sleep(1)
-
-        # Start listening thread
         threading.Thread(target=self.listen_for_messages, daemon=True).start()
 
-        # Send initial message
         self.send_message("Hello Bobby! 🕊️")
-        print("Initial message sent.")
+        print("Initial message sent")
 
-        # Continuous input loop
         while True:
             message = input("You (Alice): ")
             self.send_message(message)
